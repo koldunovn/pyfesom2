@@ -70,8 +70,10 @@ import warnings
 from typing import Optional, Sequence, Union, MutableMapping, Tuple
 
 import cartopy.crs as ccrs
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
+from matplotlib.tri import Triangulation
 from shapely.geometry import MultiPolygon, Polygon, LineString
 
 # New Types
@@ -471,8 +473,10 @@ class FESOMDataset:
         self._xrobj = xr_obj = xr_dataset
         # TODO: check valid fesom data? otherwise accessor is available on all xarray datasets
         self._tree_obj = None
+        self._ncyclic_faces = None
         for datavar in xr_obj.data_vars.keys():
             setattr(self, str(datavar), FESOMDataArray(xr_obj[datavar], xr_obj))
+        self._native_projection = ccrs.PlateCarree()
 
     def select(self, method: str = 'nearest', tolerance: Optional[float] = None, region: Optional[Region] = None,
                path: Optional[Path] = None, **indexers):
@@ -560,11 +564,64 @@ class FESOMDataset:
             return self._tree_obj
         return self._build_tree()
 
+    @property
+    def _noncyclic_faces(self):
+        """Property to regulate and optimize access to non cyclic faces array."""
+        if self._ncyclic_faces is None:
+            from .ut import get_no_cyclic
+            mesh = SimpleMesh(lon=self._xrobj.lon.values,lat=self._xrobj.lat.values, faces=self._xrobj.faces.values)
+            noncyclic_inds = get_no_cyclic(mesh, mesh.elem)
+            self._ncyclic_faces = mesh.elem[noncyclic_inds]
+        return self._ncyclic_faces
+
+    def _triangulation_on_projection(self, data, projection=None) -> Triangulation:
+        if projection is not None:
+            # transform_points (note transform_points cannot directly take DataArrays unlike Triangulation)
+            tr_x, tr_y, _ = projection.transform_points(self._native_projection, data.lon.values, data.lat.values).T
+            tri = Triangulation(tr_x, tr_y, triangles=self._noncyclic_faces)
+        else:  # grid native projection, no transformation needed
+            tri = Triangulation(data.lon, data.lat, triangles=self._noncyclic_faces)
+        return tri
+
+    def plot_mesh(self, *args, **kwargs):
+        """Plots a dataset's underlying triangular grid using Matplotlib's triplot.
+
+        Parameters
+        ----------
+        args
+            Arguments passed to Matplotlib's triplot.
+        kwargs
+            Key word arguments passed to Matplotlib's triplot.
+        Returns
+        -------
+        list
+            The list contains 2 matplotlib.lines.Line2D objects.
+        """
+        data = self._xrobj
+        projection = kwargs.pop('projection', self._native_projection)
+        ax = kwargs.pop('ax', plt.axes(projection=projection))
+
+        if 'extents' in kwargs:
+            ax.set_extent(kwargs.pop('extents'), crs=ccrs.PlateCarree())
+
+        tri = self._triangulation_on_projection(data, projection)
+        return ax.triplot(tri, *args, **kwargs)
+
     def __repr__(self):
         return self._xrobj.__repr__()
 
     def _repr_html_(self):
         return self._xrobj._repr_html_()
+
+
+def _trimesh_plotfn(darr, tris, **other_dims):
+    import geoviews as gv
+    tris = np.asarray(tris)
+    data = darr.sel(**other_dims)
+    var_name = data.name
+    var_da = gv.Dataset((darr.lon, darr.lat, data),
+                        kdims=['lon', 'lat'], vdims=[var_name])
+    return gv.TriMesh((tris, var_da))
 
 
 class FESOMDataArray:
@@ -574,6 +631,7 @@ class FESOMDataArray:
         self._xrobj = xr_dataarray
         self._context_dataset = context_dataset
         self._native_projection = ccrs.PlateCarree()
+        self._is_geoviews_loaded = False
 
     def select(self, method: str = 'nearest', tolerance: float = None, region: Optional[Region] = None,
                path: Optional[Path] = None, **indexers):
@@ -651,6 +709,359 @@ class FESOMDataArray:
         tree = self._context_dataset.pyfesom2._tree
         return select_points(self._xrobj, lon, lat, method=method, tolerance=tolerance, tree=tree, return_distance=True,
                              **other_dims)
+
+    def plot_mesh(self, *args, **kwargs):
+        """Plots a dataset's underlying triangular grid using Matplotlib's triplot.
+
+            Parameters
+            ----------
+            args
+                Arguments passed to Matplotlib's triplot.
+            kwargs
+                Key word arguments passed to Matplotlib's triplot.
+            Returns
+            -------
+            list
+                The list contains 2 matplotlib.lines.Line2D objects.
+            """
+
+        return self._context_dataset.pyfesom2.plot_mesh(*args, **kwargs)
+
+    def _triangulation_on_projection(self, data, projection=None) -> Triangulation:
+        if projection is not None:
+            # transform_points (note transform_points cannot directly take DataArrays unlike Triangulation)
+            tr_x, tr_y, _ = projection.transform_points(self._native_projection, data.lon.values, data.lat.values).T
+            tri = Triangulation(tr_x, tr_y, triangles=self._context_dataset.pyfesom2._noncyclic_faces)
+        else:  # grid native projection
+            tri = Triangulation(data.lon, data.lat, triangles=self._context_dataset.pyfesom2._noncyclic_faces)
+        return tri
+
+    def contour(self, *args, **kwargs):
+        """Contour plot on FESOM2's unstructured data variable.
+
+        This accessor method wraps matplotlib's tricontour.
+
+        Parameters
+        ----------
+        args
+            args to matplotlib's tricontour.
+        kwargs
+            kwargs to matplotlib's tricontour.
+
+        Returns
+        -------
+         matplotlib.tri.tricontour.TriContourSet
+        """
+        data = self._xrobj.squeeze()
+
+        if len(data.dims) > 1 or "nod2" not in data.dims:
+            raise Exception('Not a spatial dataset')
+
+        if "projection" in kwargs and "ax" in kwargs:
+            raise ValueError('Using both ax and projection arguments is ambiguous.'
+                             ' Only one argument at a time is currently supported.')
+
+        projection = kwargs.pop('projection', None)
+        ax = kwargs.pop('ax', None)
+
+        if ax is not None:
+            projection = ax.projection
+            tri = self._triangulation_on_projection(data, projection)
+        else:
+            if projection is None:
+                projection = self._native_projection
+                tri = self._triangulation_on_projection(data)
+            else:
+                tri = self._triangulation_on_projection(data, projection)
+            ax = plt.axes(projection=projection)
+
+        if 'extents' in kwargs:
+            ax.set_extent(kwargs.pop('extents'), crs=self._native_projection)
+
+        minv, maxv = data.min().values, data.max().values
+        data = data.fillna(minv - 9999)  # make sure missing values are out of data bounds
+
+        levels = kwargs.pop('levels', np.unique(np.round(np.linspace(minv, maxv, 20), 1)))
+        kwargs.update({'levels': levels})
+
+        colorbar = kwargs.pop('colorbar', False)
+        cbar_kwargs = kwargs.pop('cbar_kwargs', {'inline': True})
+
+        coastlines = kwargs.pop('coastlines', True)
+
+        title = kwargs.pop('title', data.name)
+        ax.set_title(title)
+
+        pl = ax.tricontour(tri, data, *args, **kwargs)
+
+        if colorbar:
+            ax.clabel(pl, **cbar_kwargs)
+
+        if coastlines:
+            ax.coastlines()
+
+        return pl
+
+    def contourf(self, *args, **kwargs):
+        """Filled contour plot on FESOM2's unstructured data variable.
+
+        This accessor method wraps matplotlib's tricontourf.
+
+        Parameters
+        ----------
+        args
+            args to matplotlib's tricontourf.
+        kwargs
+            kwargs to matplotlib's tricontourf.
+
+        Returns
+        -------
+        matplotlib.tri.tricontour.TriContourSet
+        """
+        data = self._xrobj.squeeze()
+
+        if len(data.dims) > 1 or "nod2" not in data.dims:
+            raise Exception('Not a spatial dataset')
+
+        if "projection" in kwargs and "ax" in kwargs:
+            raise ValueError('Using both ax and projection arguments is ambiguous.'
+                             ' Only one argument at a time is currently supported.')
+
+        projection = kwargs.pop('projection', None)
+        ax = kwargs.pop('ax', None)
+
+        if ax is not None:
+            projection = ax.projection
+            tri = self._triangulation_on_projection(data, projection)
+        else:
+            if projection is None:
+                projection = self._native_projection
+                tri = self._triangulation_on_projection(data)
+            else:
+                tri = self._triangulation_on_projection(data, projection)
+            ax = plt.axes(projection=projection)
+
+        if 'extents' in kwargs:
+            ax.set_extent(kwargs.pop('extents'), crs=self._native_projection)
+
+        minv, maxv = data.min().values, data.max().values
+        data = data.fillna(minv - 9999)  # make sure missing values are out of data bounds
+
+        levels = kwargs.pop('levels', np.unique(np.round(np.linspace(minv, maxv, 20), 1)))
+        kwargs.update({'levels': levels})
+
+        colorbar = kwargs.pop('colorbar', True)
+        cbar_kwargs = kwargs.pop('cbar_kwargs', {'orientation': 'horizontal'})
+
+        coastlines = kwargs.pop('coastlines', True)
+
+        title = kwargs.pop('title', data.name)
+        ax.set_title(title)
+
+        pl = ax.tricontourf(tri, data, *args, **kwargs)
+
+        if colorbar:
+            plt.colorbar(pl, ax=ax, **cbar_kwargs)
+
+        if coastlines:
+            ax.coastlines()
+        return pl
+
+    def pcolor(self, *args, shading='flat', **kwargs):
+        """Raster plot on FESOM2's unstructured data variable.
+
+        This accessor method wraps matplotlib's tripcolor.
+
+        Parameters
+        ----------
+        args
+            args to matplotlib's tripcolor.
+        shading
+            shading styles: auto, flat, gourand, nearest.
+        kwargs
+            kwargs to matplotlib's tripcolor.
+
+        Returns
+        -------
+        matplotlib.collections.PolyCollection
+        """
+        data = self._xrobj.squeeze()
+
+        if len(data.dims) > 1 or "nod2" not in data.dims:
+            raise Exception('Not a spatial dataset')
+
+        if "projection" in kwargs and "ax" in kwargs:
+            raise ValueError(
+                'Using both ax and projection arguments is ambiguous. Only one argument at a time is currently supported.')
+
+        projection = kwargs.pop('projection', None)
+        ax = kwargs.pop('ax', None)
+
+        if ax is not None:
+            projection = ax.projection
+            tri = self._triangulation_on_projection(data, projection)
+        else:
+            if projection is None:
+                projection = self._native_projection
+                tri = self._triangulation_on_projection(data)
+            else:
+                tri = self._triangulation_on_projection(data, projection)
+            ax = plt.axes(projection=projection)
+
+        if 'extents' in kwargs:
+            ax.set_extent(kwargs.pop('extents'), crs=self._native_projection)
+
+        minv, maxv = data.min().values, data.max().values
+
+        data = data.fillna(minv - 9999)  # make sure missing values are out of data bounds
+        kwargs.update({'vmin': minv, 'vmax': maxv})
+
+        colorbar = kwargs.pop('colorbar', True)
+        cbar_kwargs = kwargs.pop('cbar_kwargs', {'orientation': 'horizontal'})
+
+        coastlines = kwargs.pop('coastlines', True)
+
+        title = kwargs.pop('title', data.name)
+        ax.set_title(title)
+
+        pl = ax.tripcolor(tri, data, *args, shading=shading, **kwargs)
+
+        if colorbar:
+            plt.colorbar(pl, ax=ax, **cbar_kwargs)
+
+        if coastlines:
+            ax.coastlines()
+        return pl
+
+    def plot_transect(self, lon: ArrayLike, lat: ArrayLike, plot_type: str = 'auto', **indexers_plot_kwargs):
+        """Opinionated plotting of a transect or trajectory.
+
+        This method does point selection using `select_points` and plots in a single step for
+        convenience. For other plotting preferences usual Xarray plotting on dataset returned
+        from `select_points` can be used.
+
+        Parameters
+        ----------
+        lon
+            An array of longitudes.
+        lat
+            An array of latitudes.
+        plot_type
+            Determines default plot type based on number of dimensions, e.g., line plot vs contour plot.
+        indexers_plot_kwargs
+            Other indexers that can be used for trajectory selection like time=..., nz1=...
+
+        Returns
+        -------
+        matplotlib.collections.PolyCollection
+
+        """
+        default_plot_types = ('line', 'contourf')  # 1d and 2d defaults
+        extra_dims = [k for k in indexers_plot_kwargs.keys() if
+                      k in self._xrobj.coords]  # coords is used instead of dims because xarray will raise error
+        # in selection if user passes a invalid dim otherwise we would have to.
+
+        extra_indexers = {dim: indexers_plot_kwargs.pop(dim) for dim in extra_dims}
+        tree = self._context_dataset.pyfesom2._tree
+        lon, lat = np.asarray(lon), np.asarray(lat)
+        sel = select_points(self._xrobj, lon=lon, lat=lat, tree=tree, **extra_indexers)
+        sel = sel.squeeze()  # squeeze out dims with len 1
+        dim_len = len(sel.dims)  # determines plot type, 1d or 2d
+
+        # make time as default bottom x-axis if present (else formatting gets hard)
+        xax_dims = ('time', 'distance') if 'time' in extra_dims else ('distance', None)
+
+        if 'time' in extra_dims:
+            sel['nod2'] = sel.time
+        else:
+            sel['nod2'] = sel.distance
+
+        sel = sel.transpose(..., 'nod2')  # push points to last for making it default xaxis for plots
+
+        # use xarray plotting as it formats datetime axis with ease and adds sensible default to plot.
+        if dim_len == 1:
+            plot_type = default_plot_types[0] if plot_type == 'auto' else plot_type
+            plot_fn = getattr(sel.plot, plot_type)
+            plot = plot_fn(**indexers_plot_kwargs)[0]
+        elif dim_len == 2:
+            plot_type = default_plot_types[1] if plot_type == 'auto' else plot_type
+            plot_fn = getattr(sel.plot, plot_type)
+            plot = plot_fn(**indexers_plot_kwargs)
+        else:
+            raise Exception(f'A 2-d plot can have 1-2 dimensions, variable {sel.name} has dimensions: {sel.dims}.')
+
+        ax = plot.ax if hasattr(plot, 'ax') else plot.axes  # akward some plots have it as ax, some as axes depending on
+        # the version of matplotlib
+
+        if xax_dims[1]:  # then it must be distance according to above.
+            ax2 = ax.twiny()
+            ax2.set_xlim(sel.distance.min(), sel.distance.max())
+            ax2.set_xlabel(f'distance [{sel.distance.units}]')
+        return plot
+
+    def _load_geoviews_extension(self):
+        """Load geoviews extension in notebook context just once"""
+        import geoviews
+        geoviews.extension('bokeh')
+        self._is_geoviews_loaded = True
+
+    def trimesh(self, levels=None, cmap='RdBu', colorbar=True, height=350, width=600,
+                colorbar_position="right", projection=None, coastline=False, tools=None, interpolation=None,
+                aggregator='mean', **hv_kwopts):
+        import functools
+        try:
+            import geoviews as gv
+            import holoviews as hv
+            from holoviews.operation.datashader import rasterize
+            if not self._is_geoviews_loaded:
+                self._load_geoviews_extension()
+        except ImportError as ex:
+            raise ImportError('Using trimesh needs geoviews[holoviews, bokeh] and datashader') from ex
+
+        data_arr = self._xrobj
+        tris = self._context_dataset.faces
+
+        tools = tools if tools is not None else []
+
+        trimesh_fn = functools.partial(_trimesh_plotfn, darr=data_arr, tris=tris)
+        var_name = data_arr.name
+        hvd = hv.Dataset(data_arr.drop_vars(['lon', 'lat']))
+        non_plot_dims = {dim: data_arr[dim].values for dim in data_arr.dims if dim != 'nod2'}
+        dmap = hv.DynamicMap(trimesh_fn,
+                             kdims=list(non_plot_dims.keys())).redim.values(**non_plot_dims)
+        if 'nz1' in non_plot_dims.keys():
+            dmap = dmap.redim.default(nz1=data_arr.nz1.values[0])
+            dmap = dmap.redim.unit(nz1='m')
+            dmap = dmap.redim.label(nz1='level')
+
+        plot_opts = {**hv_kwopts}
+
+        projection = projection if projection is not None else self._native_projection
+        plot_opts.update({'projection': projection})
+        plot_opts.update({'colorbar_position': colorbar_position})
+
+        if levels is not None:
+            if isinstance(levels, int):
+                plot_opts.update({'color_levels': levels})
+            elif isinstance(levels, (Sequence, np.ndarray)):
+                if len(levels) > 2:
+                    plot_opts.update({'color_levels': len(levels)})
+                    dmap = dmap.redim.range(**{var_name: (min(levels), max(levels))})
+                elif len(levels) == 2:
+                    dmap = dmap.redim.range(**{var_name: levels})
+            else:
+                raise Exception('Invalid levels, should be a tuple with limits or a sequence of values')
+        else:
+            dmap = dmap.opts(framewise=True)
+
+        plot = rasterize(dmap, interpolation=interpolation, aggregator=aggregator).opts(width=width,
+                                                                                        height=height,
+                                                                                        cmap=cmap, colorbar=colorbar,
+                                                                                        tools=tools, **plot_opts)
+
+        if coastline:
+            plot = plot * gv.feature.coastline
+        return plot
 
     def __repr__(self):
         return f"Wrapped {self._xrobj.__repr__()}\n{super().__repr__()}"

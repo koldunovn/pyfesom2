@@ -370,3 +370,40 @@ def test_dataarray_accessor_methods(dataset):
         assert getattr(dataset.pyfesom2, data_var).select(
             path=dict_path) is not None, 'select cannot take lon,lat as dictionary'
         assert getattr(dataset.pyfesom2, data_var).select_points(lon=lons, lat=lats) is not None
+
+
+def test_accessor_mesh_plotting(dataset):
+    """Basic tests to check if plot_mesh exists on dataset and dataarray accessor exists
+    and return right type."""
+
+    from matplotlib.lines import Line2D
+
+    assert hasattr(dataset.pyfesom2, 'plot_mesh')
+    mesh_plot = dataset.pyfesom2.plot_mesh()
+    assert isinstance(mesh_plot, list)
+    assert isinstance(mesh_plot[0], Line2D)
+
+    for data_var in dataset.data_vars.keys():
+        mesh_plot = getattr(dataset.pyfesom2, data_var).plot_mesh()
+        assert isinstance(mesh_plot[0], Line2D)
+
+
+def test_accessor_contour_plotting(dataset):
+    """Basic tests to check if contour plotting methods exist on accessor and return right type."""
+    from matplotlib.tri.tricontour import TriContourSet
+    from matplotlib.contour import QuadContourSet
+    from matplotlib.collections import PolyCollection
+
+    # reduce all other dims then nod2 to simplify plotting
+    sel_da = dataset.isel(**{dim: 1 for dim in list(dataset.dims) if not dim in ['nod2', 'elem', 'nelem', 'three']})
+
+    for data_var in sel_da.data_vars.keys():
+        # contours
+        contour_plot = getattr(sel_da.pyfesom2, data_var).contour()
+        assert isinstance(contour_plot, TriContourSet)
+        # filled contours
+        contour_plot = getattr(sel_da.pyfesom2, data_var).contourf()
+        assert isinstance(contour_plot, TriContourSet)
+        # raster plot
+        raster_plot = getattr(sel_da.pyfesom2, data_var).pcolor()
+        assert isinstance(raster_plot, PolyCollection)

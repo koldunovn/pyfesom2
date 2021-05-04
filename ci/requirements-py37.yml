@@ -1,6 +1,7 @@
 name: pyfesom2
 channels:
   - conda-forge
+  - pyviz
 dependencies:
   - pandas
   - numpy>=1.16
@@ -20,6 +21,9 @@ dependencies:
   - zarr
   - fsspec
   - requests
-  - aiohttp 
+  - aiohttp
   - dask
   - xarray
+  - geoviews
+  - holoviews
+  - datashader
