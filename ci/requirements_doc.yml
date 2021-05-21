@@ -17,4 +17,9 @@ dependencies:
       - shapely
       - matplotlib
       - seawater
-
+      - nbsphinx
+      - ipython
+      - ipykernel
+      - pandoc
+      - sphinx_copybutton
+      - sphinx_gallery
