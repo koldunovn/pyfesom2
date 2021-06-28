@@ -18,9 +18,6 @@ cmip6_grids = {
     'AWI-CM-HR': {
         "path_url"   : "https://swift.dkrz.de/v1/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/cmip6-grids/zarr/awicm-hr",
         "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/cmip6-grids/zarr/awicm-hr"},
-    "A01"      : {
-        "path_url"   : "https://swift.dkrz.de/v1/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/A01",
-        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/A01"}
 }
 
 frontier_datasets = {
@@ -32,13 +29,17 @@ frontier_datasets = {
         "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/frontier/rossby42_level_aceess"},
     "ROSSBY4.2_spatial": {
         "path_url"   : "https://swift.dkrz.de/v1/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/frontier/rossby42_spatial_aceess",
-        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/frontier/rossby42_spatial_aceess"}}
+        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/frontier/rossby42_spatial_aceess"},
+    "A01"              : {
+        "path_url"   : "https://swift.dkrz.de/v1/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/A01",
+        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/A01"}
+}
 
 all_datasets = {
     "CORE"   : {
-        "path_url"   : "https://swift.dkrz.de/v1/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/LCORE",
-        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_02942825-0cab-44f3-ad37-80fd5d2e37e3/FESOM2_data/LCORE",
-        "var_list"   : ["temp", "salt", "a_ice", "m_ice", "ssh", "sst", "mesh"]},
+        "path_url"   : "https://swift.dkrz.de/v1/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/tutorial/core2",
+        "Dataset URL": "https://swiftbrowser.dkrz.de/public/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/tutorial/core2",
+        "group"      : "variables"},
     "pi-grid": {
         'path_url'   : "https://swift.dkrz.de/v1/dkrz_035d8f6ff058403bb42f8302e6badfbc/pyfesom2/tutorial/pi-grid",
         "var_list"   : ['a_ice', 'm_ice', 'temp', 'u', 'v', 'w', 'mesh'],
@@ -54,7 +55,8 @@ class RemoteZarrDataset:
     Dataset is only loaded on .load() for dataset contaning more variables
     """
 
-    def __init__(self, path_url: str, var_list: Optional[Sequence] = None, consolidated: bool = True, **kwargs):
+    def __init__(self, path_url: str, var_list: Optional[Sequence] = None, group: Optional[str] = None,
+                 consolidated: bool = True, **kwargs):
         """Initializes a remote zarr dataset.
 
         Dataset is loaded only on .load() method.
@@ -72,6 +74,7 @@ class RemoteZarrDataset:
         """
         self.path_url = path_url  # can also be local path remove fsspec in that case
         self.var_list = var_list
+        self.group = group
         self.is_consolidated = consolidated
         self.dset_attrs = kwargs
         self._ds = None
@@ -88,10 +91,12 @@ class RemoteZarrDataset:
         if self._ds is None:
             if self.var_list is not None:
                 urls = [self.path_url + "/" + var for var in self.var_list]
-                dataset_list = [xr.open_zarr(fsspec.get_mapper(url), consolidated=self.is_consolidated) for url in urls]
+                dataset_list = [
+                    xr.open_zarr(fsspec.get_mapper(url), group=self.group, consolidated=self.is_consolidated) for url in
+                    urls]
                 self._ds = xr.merge(dataset_list)
             else:
-                self._ds = xr.open_zarr(self.path_url, consolidated=True)
+                self._ds = xr.open_zarr(self.path_url, group=self.group, consolidated=self.is_consolidated)
 
             self._ds.attrs.update(self.dset_attrs)
         return self._ds
